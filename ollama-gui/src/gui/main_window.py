@@ -1,14 +1,15 @@
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                            QComboBox, QPushButton, QTextBrowser, QLineEdit,
                            QLabel, QFrame, QSplitter, QScrollArea, QFileDialog, QPlainTextEdit, 
-                           QGroupBox)
-from PyQt5.QtCore import Qt, QSize
-from PyQt5.QtGui import QFont, QColor, QPalette
+                           QGroupBox, QTextEdit, QListWidget, QListWidgetItem, QGraphicsOpacityEffect,
+                           QApplication, QToolButton)
+from PyQt5.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QPoint
+from PyQt5.QtGui import QFont, QColor, QPalette, QClipboard
 import markdown2
 import requests
 import json
 import os
-from .message_widget import MessageWidget
+import shutil
 from .file_handler import FileContextManager
 
 class ChatMessage(QFrame):
@@ -31,6 +32,37 @@ class ChatMessage(QFrame):
         content.setReadOnly(True)
         content.setFont(QFont("Inter", 10))
         layout.addWidget(content)
+
+        # Add copy button
+        copy_button = QToolButton()
+        copy_button.setText("📋")
+        copy_button.setStyleSheet("""
+            QToolButton {
+                background-color: transparent;
+                border: none;
+                color: #8e8ea0;
+                font-size: 14px;
+            }
+            QToolButton:hover {
+                color: #ffffff;
+            }
+        """)
+        copy_button.clicked.connect(lambda: self.copy_to_clipboard(text))
+        layout.addWidget(copy_button, alignment=Qt.AlignRight)
+
+        # Add animation effect
+        self.opacity_effect = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self.opacity_effect)
+        self.animation = QPropertyAnimation(self.opacity_effect, b"opacity")
+        self.animation.setDuration(500)  # 0.5 seconds
+        self.animation.setStartValue(0)
+        self.animation.setEndValue(1)
+        self.animation.setEasingCurve(QEasingCurve.InOutQuad)
+        self.animation.start()
+
+    def copy_to_clipboard(self, text):
+        clipboard = QApplication.clipboard()
+        clipboard.setText(text)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -59,7 +91,7 @@ class MainWindow(QMainWindow):
             QComboBox:hover, QPushButton:hover {
                 background-color: #4d4d4d;
             }
-            QLineEdit {
+            QTextEdit {
                 background-color: #3c3c3c;
                 color: white;
                 padding: 12px;
@@ -78,6 +110,19 @@ class MainWindow(QMainWindow):
             }
             QLabel {
                 color: #000;
+            }
+            QListWidget {
+                background-color: #3c3c3c;
+                color: white;
+                border: 1px solid #4d4d4d;
+                border-radius: 5px;
+                padding: 5px;
+            }
+            QListWidget::item {
+                padding: 5px;
+            }
+            QListWidget::item:hover {
+                background-color: #4d4d4d;
             }
         """)
 
@@ -104,10 +149,14 @@ class MainWindow(QMainWindow):
         # Refresh button
         self.refresh_btn = QPushButton("Refresh Models")
         sidebar_layout.addWidget(self.refresh_btn)
-        sidebar_layout.addStretch()
+        
+        # New Conversation button
+        self.new_convo_btn = QPushButton("New Conversation")
+        self.new_convo_btn.clicked.connect(self.new_conversation)
+        sidebar_layout.addWidget(self.new_convo_btn)
         
         # File interaction section in sidebar
-        file_group = QGroupBox("File Interaction")
+        file_group = QGroupBox("Uploaded Files")
         file_group.setStyleSheet("""
             QGroupBox {
                 color: white;
@@ -122,8 +171,14 @@ class MainWindow(QMainWindow):
         self.upload_btn.clicked.connect(self.handle_file_upload)
         file_layout.addWidget(self.upload_btn)
         
+        # List of uploaded files
+        self.file_list = QListWidget()
+        self.file_list.itemClicked.connect(self.select_file)
+        file_layout.addWidget(self.file_list)
+        
         # Add to sidebar
-        sidebar_layout.insertWidget(sidebar_layout.count()-1, file_group)
+        sidebar_layout.addWidget(file_group)
+        sidebar_layout.addStretch()
         
         # Chat area
         chat_widget = QWidget()
@@ -149,13 +204,14 @@ class MainWindow(QMainWindow):
         """)
         chat_layout.addWidget(self.scroll_area)
         
-        # Input area
+        # Input area at the bottom
         input_widget = QWidget()
         input_layout = QHBoxLayout(input_widget)
         
-        self.input_field = QLineEdit()
+        self.input_field = QTextEdit()
         self.input_field.setPlaceholderText("Send a message...")
-        self.input_field.returnPressed.connect(self.send_message)
+        self.input_field.setMaximumHeight(100)
+        self.input_field.textChanged.connect(self.adjust_input_height)
         
         self.send_btn = QPushButton("Send")
         self.send_btn.clicked.connect(self.send_message)
@@ -173,7 +229,17 @@ class MainWindow(QMainWindow):
         
         # Initialize
         self.get_models()
-        self.first_prompt_after_upload = True
+        self.uploaded_files = {}  # Dictionary to store file paths and their content
+        self.current_file = None  # Currently selected file
+
+        # Timer for file deletion
+        self.file_deletion_timer = QTimer()
+        self.file_deletion_timer.timeout.connect(self.delete_uploaded_file)
+        self.file_deletion_timer.setInterval(300000)  # 5 minutes
+
+    def adjust_input_height(self):
+        doc_height = self.input_field.document().size().height()
+        self.input_field.setFixedHeight(min(int(doc_height) + 20, 100))
 
     def get_models(self):
         try:
@@ -185,8 +251,8 @@ class MainWindow(QMainWindow):
             self.add_message(f"Error loading models: {str(e)}", is_user=False)
 
     def add_message(self, text, is_user=True):
-        message = MessageWidget(text, is_user)
-        self.messages_layout.insertWidget(self.messages_layout.count()-1, message)
+        message = ChatMessage(text, is_user)
+        self.messages_layout.insertWidget(self.messages_layout.count() - 1, message)
         # Auto scroll to bottom
         self.scroll_area.verticalScrollBar().setValue(
             self.scroll_area.verticalScrollBar().maximum()
@@ -204,27 +270,64 @@ class MainWindow(QMainWindow):
             if isinstance(result, str):
                 self.add_message(f"Error loading file: {result}", is_user=False)
             else:
-                self.first_prompt_after_upload = True
+                self.uploaded_files[file_path] = self.file_handler.current_file_content
+                self.file_list.addItem(os.path.basename(file_path))
                 self.add_message(
                     f"File loaded: {os.path.basename(file_path)}. You can now ask questions about it.",
                     is_user=False
                 )
+                # Start the file deletion timer
+                self.file_deletion_timer.start()
+
+    def select_file(self, item):
+        file_name = item.text()
+        for file_path in self.uploaded_files:
+            if os.path.basename(file_path) == file_name:
+                self.current_file = file_path
+                self.file_handler.current_file_content = self.uploaded_files[file_path]
+                self.file_handler.file_path = file_path
+                self.add_message(f"Selected file: {file_name}", is_user=False)
+                break
+
+    def delete_uploaded_file(self):
+        if self.current_file:
+            try:
+                os.remove(self.current_file)
+                self.uploaded_files.pop(self.current_file)
+                self.file_list.clear()
+                for file_path in self.uploaded_files:
+                    self.file_list.addItem(os.path.basename(file_path))
+                self.current_file = None
+                self.file_handler.current_file_content = None
+                self.file_handler.file_path = None
+                self.add_message("Uploaded file has been deleted due to inactivity.", is_user=False)
+            except Exception as e:
+                self.add_message(f"Error deleting file: {str(e)}", is_user=False)
+        self.file_deletion_timer.stop()
+
+    def new_conversation(self):
+        self.messages_container.deleteLater()
+        self.messages_container = QWidget()
+        self.messages_layout = QVBoxLayout(self.messages_container)
+        self.messages_layout.addStretch()
+        self.messages_layout.setSpacing(20)
+        self.scroll_area.setWidget(self.messages_container)
+        self.add_message("Started a new conversation.", is_user=False)
 
     def send_message(self):
-        message = self.input_field.text()
+        message = self.input_field.toPlainText()
         if not message.strip():
             return
             
-        # Handle file context in first prompt
-        if self.file_handler.current_file_content and self.first_prompt_after_upload:
+        # Handle file context in all prompts
+        if self.file_handler.current_file_content:
             prompt = f"""This is my file name {os.path.basename(self.file_handler.file_path)}, 
 it having content are:
 {self.file_handler.current_file_content}
 
 User question: {message}"""
-            self.first_prompt_after_upload = False
         else:
-            prompt = self.file_handler.get_context_prompt(message)
+            prompt = message
         
         self.add_message(message, is_user=True)
         self.input_field.clear()
