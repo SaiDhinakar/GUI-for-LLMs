@@ -8,7 +8,7 @@ The `GUI-for-LLMs` project is a modern and user-friendly graphical user interfac
 
 ## Project Structure
 ```
-ollama-gui
+GUI-for-LLMs
 ├── src
 │   ├── main.py                # Entry point of the application
 │   ├── gui                    # Contains GUI components
