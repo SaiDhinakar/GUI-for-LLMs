@@ -30,6 +30,7 @@ GUI-for-LLMs
    
 2. Install the required dependencies:
    ```
+   cd GUI-for-LLMs
    pip install -r requirements.txt
    ```
 
