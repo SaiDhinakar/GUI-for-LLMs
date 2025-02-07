@@ -19,7 +19,6 @@ ollama-gui
 │       ├── __init__.py
 │       └── document_parser.py # Extract the content from the document
 ├── requirements.txt           # Project dependencies
-├── .gitignore                 # Files and directories to ignore by Git
 └── README.md                  # Project documentation
 ```
 
